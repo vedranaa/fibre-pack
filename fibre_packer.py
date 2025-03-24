@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from tqdm import tqdm
 
+RNG = torch.Generator().manual_seed(13)  
+
 def show_slice(p, radii, c, title=None):
     colors = px.colors.qualitative.Plotly
     shapes = []
@@ -84,9 +86,9 @@ def animate_slices(configuration, radii, c, title=None):
             line_color='gray', opacity=0.5, line_width=5))
         frames.append(go.Frame(layout=dict(shapes=shapes), name=str(z)))
     
-    rng = [-c - radii.max(), c + radii.max()]
+    xyrange = [-c - radii.max(), c + radii.max()]
     layout = animation_controls(configuration.shape[0])
-    layout.update( xaxis=dict(range=rng), yaxis=dict(range=rng, scaleanchor="x"))   
+    layout.update(xaxis=dict(range=xyrange), yaxis=dict(range=xyrange, scaleanchor="x"))   
     fig = go.Figure(layout=layout, frames=frames)
     fig.update_layout(shapes=frames[0].layout.shapes)
     if title:
@@ -102,18 +104,22 @@ def show_losses(loss_contributions):
         yaxis_title='Loss', yaxis_type='log') 
     fig.show()
 
-def initialize_slice_points(c, N):
-    ri = torch.sqrt(torch.rand(N, generator=RNG) * c**2)
-    ai = torch.rand(N, generator=RNG) * 2 * torch.pi
+def show_radii_distribution(radii):
+    fig = px.histogram(radii, title='Radii distribution', nbins=50)
+    fig.show()
+
+def initialize_slice_points(c, N, generator=RNG):
+    ri = torch.sqrt(torch.rand(N, generator=generator) * c**2)
+    ai = torch.rand(N, generator=generator) * 2 * torch.pi
     p = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
     return p
 
-def initialize_configuration_naively(c, N, Z):
+def initialize_configuration_naively(c, N, Z, generator=RNG):
     p = initialize_slice_points(c, N)
     configuration = [p]
     a = 0 * p
     for i in range(1, Z):
-        a +=  0.1 * torch.randn_like(p, generator=RNG)
+        a +=  0.1 * torch.randn_like(p, generator=generator)
         configuration.append(configuration[-1] + a)
     configuration = torch.stack(configuration)
     r = configuration.norm(dim=1).max(dim=0)[0]
@@ -122,11 +128,11 @@ def initialize_configuration_naively(c, N, Z):
     scale = torch.outer(torch.linspace(0, 1, Z), s - 1) + 1
     return configuration / scale.view(Z, 1, N)
 
-def initialize_radii(c, fvf, r_mean, r_sigma=0):
+def initialize_radii(c, fvf, r_mean, r_sigma=0, generator=RNG):
     '''Get radii for a domain radius, FVF and mean (and sigma) for fibre radius.'''
     f = fvf / 100 * (c**2) 
     N = int(f / (r_mean**2))  # This is not correct if r_sigma 
-    r = r_mean + r_sigma * torch.randn(N, generator=RNG)
+    r = r_mean + r_sigma * torch.randn(N, generator=generator)
     r = torch.clamp(r, 0.01 * r_mean)
     return r * (f / (r**2).sum()) ** 0.5
 
@@ -167,7 +173,7 @@ def rotate_bundle(p, radii, center, radius, angle):
     p[:, bundle] = R @ (p[:, bundle] - center) + center
     return p
 
-def swap_points(p, K=None):
+def swap_points(p, K=None, generator=RNG):
     '''Swap random (but relatively close) points.'''
     k = 36  # Consider k nearest neighbors for swapping
     N = p.shape[1]  # Number of points
@@ -176,11 +182,11 @@ def swap_points(p, K=None):
     if K is None:
         K = N//5  # 120 percent of points
     inds = torch.topk(d, k + 1, largest=False)[1]
-    ri = torch.randint(1, k, (p.shape[1], ), generator=RNG)
+    ri = torch.randint(1, k, (p.shape[1], ), generator=generator)
     pairs = torch.stack((torch.arange(N), inds[torch.arange(N), ri]), dim=1)
     pairs, _ = torch.sort(pairs, dim=1)
     pairs = torch.unique(pairs, dim=0)
-    pairs = pairs[torch.randperm(pairs.shape[0], generator=RNG)]
+    pairs = pairs[torch.randperm(pairs.shape[0], generator=generator)]
     pairs = pairs[:K]
     for pair in pairs:
         p[:, pair] = p[:, pair.flip(0)]
@@ -212,117 +218,124 @@ def bending_penalty(c):
 def boundary_penalty(c, p0, pZ):
     return (c[0] - p0).pow(2).sum() + (c[-1] - pZ).pow(2).sum()
 
-#%%        
-def optimize_slice_points(p, radii, c, iters=2000):
-    delta = 0.01 * radii.mean()
-    n = 3
+def select_device():
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f"Using device {device}")
+    return device
+
+#%%
+
+if __name__ == '__main__':
+#%%    
+     
+    def optimize_slice_points(p, radii, c, iters=2000):
+        delta = 0.01 * radii.mean()
+        n = 3
+        N = len(radii)
+        min_d = minimal_distance(radii)
+        p.requires_grad = True
+        p.to(device)
+        optimizer = torch.optim.Adam([p], lr=0.1)
+        loss_contributions = []
+        progress_bar = tqdm(range(iters), bar_format='{l_bar}{bar}|{n_fmt}/{total_fmt}')
+        for iter in progress_bar:  
+            optimizer.zero_grad()   
+            d = pairwise_distance(p)
+            overlap = overlap_penalty(d, min_d, delta)
+            protrusion = protrusion_penalty(p, radii, c)
+            separation = separation_penalty(d, radii, n, delta)
+            loss = overlap + N * protrusion + 1/N * separation
+            loss.backward()
+            optimizer.step()
+            loss_contributions.append((overlap.item(), N * protrusion.item(), 1/N * separation.item()))
+            progress_bar.set_description(f"Overlap {overlap:.2f}, " + 
+                f"Protrusion {protrusion:.2f}", refresh=True)
+        
+        p = p.detach()
+        overlap = overlap_penalty(d, min_d)
+        protrusion = protrusion_penalty(p, radii, c)
+        loss_contributions = {k:list(v) for k, v in 
+                zip(['overlap', 'protrusion', 'separation'], zip(*loss_contributions))}
+        return p, (overlap, protrusion), loss_contributions
+
+
+#%%
+    device = select_device()
+
+    c = 40  # Domain radius
+    r0 = 2  # Mean fibre radius
+    fvf = 70  # Desired fibre volume fraction
+    Z = 20 # Number of slices
+
+    radii = initialize_radii(c, fvf, r0, 0.2 * r0)
     N = len(radii)
+
+    p0 = initialize_slice_points(c - r0, N)
+    show_slice(p0, radii, c, title='First slice (p0) initial')
+
+    p0, (overlap, protrusion), losses = optimize_slice_points(p0, radii, c)
+    show_slice(p0, radii, c, 
+        title=f'First slice (p0) optimized. Overlap {overlap:.2f}, protrusion {protrusion:.2f}')
+    show_losses(losses)
+
+
+    pZ = p0.clone()
+    pZ = rotate_bundle(pZ, radii, (c/2, 0), c/2.5, -torch.pi/2)
+    pZ = rotate_bundle(pZ, radii, (-c/2, 0), c/2, -torch.pi/3)
+    pZ = rotate_bundle(pZ, radii, (0, 0), c, torch.pi/4)
+    pz = swap_points(pZ)
+
+    show_slice(pZ, radii, c, title='Last slice (pZ) initial')
+    pZ, (overlap, protrusion), losses = optimize_slice_points(pZ, radii, c)
+    show_slice(pZ, radii, c, 
+        title=f'Last slice (pZ) optimized. Overlap {overlap:.2f}, protrusion {protrusion:.2f}')
+    show_losses(losses)
+
+    configuration = interpolate_configuration(p0, pZ, Z)
+    show_3D_configuration(configuration, title='Initial configuration')
+    animate_configuration(configuration, title='Initial configuration')
+
+    #%%
+
     min_d = minimal_distance(radii)
-    p.requires_grad = True
-    p.to(device)
-    optimizer = torch.optim.Adam([p], lr=0.1)
+    delta = 0.01 * radii.mean()
+    configuration.requires_grad = True
+    configuration.to(device)
+    optimizer = torch.optim.Adam([configuration], lr=0.1)
     loss_contributions = []
+    iters = 2000
     progress_bar = tqdm(range(iters), bar_format='{l_bar}{bar}|{n_fmt}/{total_fmt}')
     for iter in progress_bar:  
         optimizer.zero_grad()   
-        d = pairwise_distance(p)
+        d = pairwise_distance(configuration)
         overlap = overlap_penalty(d, min_d, delta)
-        protrusion = protrusion_penalty(p, radii, c)
-        separation = separation_penalty(d, radii, n, delta)
-        loss = overlap + N * protrusion + 1/N * separation
+        protrusion = protrusion_penalty(configuration, radii, c)
+        stretching = stretching_penalty(configuration)
+        bending = bending_penalty(configuration)
+        boundary = boundary_penalty(configuration, p0, pZ)
+        loss = overlap + N * protrusion + 1/N * stretching + 2/N * bending + N * boundary
         loss.backward()
         optimizer.step()
-        loss_contributions.append((overlap.item(), N * protrusion.item(), 1/N * separation.item()))
-        progress_bar.set_description(f"Overlap {overlap:.2f}, " + 
-            f"Protrusion {protrusion:.2f}", refresh=True)
-    
-    p = p.detach()
-    overlap = overlap_penalty(d, min_d)
-    protrusion = protrusion_penalty(p, radii, c)
+        loss_contributions.append((overlap.item(), N * protrusion.item(), 
+            1/N * stretching.item(), 2/N * bending.item(), N * boundary.item()))
+        progress_bar.set_description(f"Over. {overlap.item():.2f}, " + 
+                f"Prot. {protrusion.item():.1f}, " +
+                f"Str. {stretching.item():.1f}, " +
+                f"Bend. {bending.item():.1f}, " +
+                f"Boun. {boundary.item():.1f}",
+                refresh=True)
+
     loss_contributions = {k:list(v) for k, v in 
-            zip(['overlap', 'protrusion', 'separation'], zip(*loss_contributions))}
-    return p, (overlap, protrusion), loss_contributions
+            zip(['overlap', 'protrusion', 'stretching', 'bending', 'boundary'], zip(*loss_contributions))}
+    show_losses(loss_contributions)
 
-#%%
-
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-elif torch.backends.mps.is_available():
-    device = torch.device('mps')
-else:
-    device = torch.device('cpu')
-
-RNG = torch.Generator().manual_seed(13)  # Global random number generator
-
-c = 40  # Domain radius
-r0 = 2  # Mean fibre radius
-fvf = 70  # Desired fibre volume fraction
-Z = 20 # Number of slices
-
-radii = initialize_radii(c, fvf, r0, 0.2 * r0)
-N = len(radii)
-
-p0 = initialize_slice_points(c - r0, N)
-show_slice(p0, radii, c, title='First slice (p0) initial')
-
-p0, (overlap, protrusion), losses = optimize_slice_points(p0, radii, c)
-show_slice(p0, radii, c, 
-    title=f'First slice (p0) optimized. Overlap {overlap:.2f}, protrusion {protrusion:.2f}')
-show_losses(losses)
+    show_3D_configuration(configuration, title='Optimized configuration')
+    animate_slices(configuration, radii, c, title='Optimized configuration')
 
 
-pZ = p0.clone()
-pZ = rotate_bundle(pZ, radii, (c/2, 0), c/2.5, -torch.pi/2)
-pZ = rotate_bundle(pZ, radii, (-c/2, 0), c/2, -torch.pi/3)
-pZ = rotate_bundle(pZ, radii, (0, 0), c, torch.pi/4)
-pz = swap_points(pZ)
-
-show_slice(pZ, radii, c, title='Last slice (pZ) initial')
-pZ, (overlap, protrusion), losses = optimize_slice_points(pZ, radii, c)
-show_slice(pZ, radii, c, 
-    title=f'Last slice (pZ) optimized. Overlap {overlap:.2f}, protrusion {protrusion:.2f}')
-show_losses(losses)
-
-configuration = interpolate_configuration(p0, pZ, Z)
-show_3D_configuration(configuration, title='Initial configuration')
-animate_configuration(configuration, title='Initial configuration')
-
-#%%
-
-min_d = minimal_distance(radii)
-delta = 0.01 * radii.mean()
-configuration.requires_grad = True
-configuration.to(device)
-optimizer = torch.optim.Adam([configuration], lr=0.1)
-loss_contributions = []
-iters = 2000
-progress_bar = tqdm(range(iters), bar_format='{l_bar}{bar}|{n_fmt}/{total_fmt}')
-for iter in progress_bar:  
-    optimizer.zero_grad()   
-    d = pairwise_distance(configuration)
-    overlap = overlap_penalty(d, min_d, delta)
-    protrusion = protrusion_penalty(configuration, radii, c)
-    stretching = stretching_penalty(configuration)
-    bending = bending_penalty(configuration)
-    boundary = boundary_penalty(configuration, p0, pZ)
-    loss = overlap + N * protrusion + 1/N * stretching + 2/N * bending + N * boundary
-    loss.backward()
-    optimizer.step()
-    loss_contributions.append((overlap.item(), N * protrusion.item(), 
-        1/N * stretching.item(), 2/N * bending.item(), N * boundary.item()))
-    progress_bar.set_description(f"Over. {overlap.item():.2f}, " + 
-            f"Prot. {protrusion.item():.1f}, " +
-            f"Str. {stretching.item():.1f}, " +
-            f"Bend. {bending.item():.1f}, " +
-            f"Boun. {boundary.item():.1f}",
-            refresh=True)
-
-loss_contributions = {k:list(v) for k, v in 
-        zip(['overlap', 'protrusion', 'stretching', 'bending', 'boundary'], zip(*loss_contributions))}
-show_losses(loss_contributions)
-
-show_3D_configuration(configuration, title='Optimized configuration')
-animate_slices(configuration, radii, c, title='Optimized configuration')
-
-
-# %%
+    # %%
