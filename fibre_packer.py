@@ -159,6 +159,9 @@ class FibrePacker():
         self.p0 = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
     
     def initialize_end_slice_original(self):
+        if self.p0 is None:
+            print("Aborting. Start slice not initialized.")
+            return
         self.pZ = self.p0.clone()
         self.rotate_bundle((1/2, 0), 1/2.5, torch.tensor(-torch.pi/2))
         self.rotate_bundle((1/2, 0), 1/2, torch.tensor(-torch.pi/3))
@@ -167,7 +170,9 @@ class FibrePacker():
 
     def initialize_end_slice(self, misalignment, k=3):
         # k is the number of clusters
-
+        if self.p0 is None:
+            print("Aborting. Start slice not initialized.")
+            return
         if misalignment=='minimal':
             angle_range = (0, 5)
             swap = (0.01, 3)
@@ -199,6 +204,9 @@ class FibrePacker():
 
 
     def interpolate_configuration(self, Z, z_multiplier=1, type='mixed'):
+        if (self.p0 is None) or (self.pZ is None):
+            print("Aborting. Terminal slices not initialized.")
+            return
         if type == 'linear':
             w = torch.linspace(0, 1, Z)
         elif type == 'logistic':
@@ -270,13 +278,17 @@ class FibrePacker():
         fig.show()
     
     def get_slice_circles(self, id):
+        p = None
         if id=='start':
             p = self.p0
         elif id=='end':
             p = self.pZ
         else:
-            p = self.configuration[id]
-        shapes = []
+            if self.configuration is not None:
+                p = self.configuration[id]
+        if p is None:
+            return
+        shapes = []   
         for i, r in enumerate(self.radii):
             x, y = p[:, i]
             shapes.append(dict(x0=x - r, y0=y - r, x1=x + r, y1=y + r, 
@@ -287,7 +299,11 @@ class FibrePacker():
 
     def show_slice(self, id, title=None):
         fig = go.Figure()
-        fig.update_layout(shapes=self.get_slice_circles(id))
+        shapes = self.get_slice_circles(id)
+        if shapes is None:
+            print(f"Aborting. Slice {id} not found.")
+            return
+        fig.update_layout(shapes=shapes)
         fig.update_layout(self.get_layout())
         if title:
             fig.update_layout(title=title)
@@ -308,6 +324,9 @@ class FibrePacker():
         fig.show()
 
     def show_3D_configuration(self, title=None):
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
         x, y = self.configuration.transpose(0, 1)
         z = torch.arange(self.Z)
         fig = go.Figure()
@@ -328,6 +347,9 @@ class FibrePacker():
         return layout
 
     def animate_slices(self, title=None, radii=None):
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
         if radii is None:
             radii = self.radii
         frames = []
@@ -362,6 +384,10 @@ class FibrePacker():
             p = self.p0
         elif id == 'end':
             p = self.pZ
+
+        if p is None:
+            print("Aborting. Slice not initialized.")
+            return
         
         delta = delta * self.radii.mean()
         
@@ -408,11 +434,16 @@ class FibrePacker():
             self.p0 = p.detach().to('cpu')
         elif id == 'end':
             self.pZ = p.detach().to('cpu')  
-      
-        self.show_losses(losses)
+
+        return losses
 
 
     def optimize_configuration(self, iters=200, delta=0.01, weights=None, lr=0.1):
+        
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
+        
         delta = delta * self.radii.mean()
 
         if self.device is None:
@@ -474,13 +505,18 @@ class FibrePacker():
             )
 
         self.configuration = configuration.detach().to('cpu')
-        self.show_losses(losses)
+        return losses
 
 
     # ADDITIONAL HELPING METHODS
 
     def analyse_configuration(self, radii=None, return_=False):
         '''Various measures about the result. Can be used with other radii.'''
+
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
+
         if radii is None:
             radii = self.radii
         
@@ -557,6 +593,7 @@ class FibrePacker():
 
         
     def show_3D_configuration_analysis(self, analysis, title=None):
+
         x, y = self.configuration.transpose(0, 1)
         z = torch.arange(self.Z)
         fig = go.Figure()
@@ -591,6 +628,10 @@ class FibrePacker():
         fig.show()
     
     def fix_radii(self, epsilon=1e-3):
+
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
 
         d = pairwise_distance(self.configuration)
         overlap_matrix = torch.relu(self.min_d - d + epsilon).max(dim=0).values
@@ -629,6 +670,11 @@ class FibrePacker():
         return fix
     
     def save_result(self, filename, radii=None):
+        
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
+
         if radii is None:
             radii = self.radii
         x, y = self.configuration.transpose(0, 1)
@@ -641,6 +687,10 @@ class FibrePacker():
 
     
     def save_mesh(self, filename, radii=None, n=16):
+
+        if self.configuration is None:
+            print("Aborting. No configuration.")
+            return
         
         if radii is None:
             radii = self.radii
