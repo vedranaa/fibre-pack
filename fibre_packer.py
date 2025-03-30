@@ -382,9 +382,9 @@ class FibrePacker():
         
         optimizer = torch.optim.Adam([p], lr=lr)
         losses = {key: [] for key in weights.keys()}
-        progress_bar = tqdm(range(iters), bar_format=self.tqdmformat, 
-                ncols=self.tqdmwidth)
-        for iter in progress_bar:  
+        #progress_bar = tqdm(range(iters), bar_format=self.tqdmformat, 
+        #        ncols=self.tqdmwidth)
+        for iter in range(iters):  
             optimizer.zero_grad()   
             d = pairwise_distance(p)
             overlap = overlap_penalty(d, min_d, delta)
@@ -400,9 +400,9 @@ class FibrePacker():
             losses['separation'].append(separation.item())
             losses['protrusion'].append(protrusion.item())
             
-            progress_bar.set_description(
-                f"Over. {overlap:.2f}, sep. {separation:.2f}, prot. {protrusion:.1f}",
-                refresh=True)
+            #progress_bar.set_description(
+            #    f"Over. {overlap:.2f}, sep. {separation:.2f}, prot. {protrusion:.1f}",
+            #    refresh=True)
 
         if id == 'start':
             self.p0 = p.detach().to('cpu')
