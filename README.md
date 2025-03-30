@@ -1,4 +1,4 @@
-Fibre packing optimized with pytorch. Allows for changing fibre volume fraction and fibre misalignment.
+Fibre packing optimized with pytorch. Allows for changing fibre volume fraction (FVF) and fibre misalignment (M).
 
 
 ![Results](mosaic.png)
