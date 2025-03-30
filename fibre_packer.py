@@ -173,19 +173,19 @@ class FibrePacker():
         if self.p0 is None:
             print("Aborting. Start slice not initialized.")
             return
-        if misalignment=='minimal':
+        if misalignment=='very low':
             angle_range = (0, 5)
             swap = (0.01, 3)
-        elif misalignment=='tiny':
+        elif misalignment=='low':
             angle_range = (5, 10)
             swap = (0.02, 6)
-        elif misalignment=='low':
+        elif misalignment=='moderate':
             angle_range = (10, 15)
             swap = (0.04, 12)
-        elif misalignment=='medium':
+        elif misalignment=='high':
             angle_range = (15, 20)
             swap = (0.08, 24)
-        elif misalignment=='high':
+        elif misalignment=='very high':
             angle_range = (20, 25)
             swap = (0.16, 48)
 
@@ -578,15 +578,13 @@ class FibrePacker():
             'bending_coordinates': bending_coordinates,
             'bending_summary': bending_summary
         } 
-        self.show_3D_configuration_analysis(analysis, title='Location of configuration issues')
-        self.show_analysis_distribution(analysis, title='Distribution of configuration issues')
-        if return_:
-            return analysis
+        return analysis
     
     def show_analysis_distribution(self, analysis, title, nbins=50):
         fig = go.Figure()
         for id in ['overlap', 'overlap_mid', 'protrusion']:
-            fig.add_trace(go.Histogram(x=analysis[id + '_values'], nbinsx=nbins, name=id))        
+            fig.add_trace(go.Histogram(x=analysis[id + '_values'], nbinsx=nbins, 
+                    name=id, opacity=0.5))        
         fig.update_layout(xaxis_title='Values (length)', yaxis_title="Count", 
                 title=title, width=self.figsize, height=self.figsize//2)
         fig.show()
@@ -647,27 +645,30 @@ class FibrePacker():
         protrusion_matrix = torch.relu(self.configuration.norm(dim=-2) + 
                 self.radii - self.R + epsilon).max(dim=0).values
         fix = torch.maximum(fix, protrusion_matrix)
-        fix = self.radii - fix
+        fixed_radii = self.radii - fix
+        return fixed_radii
 
+
+    def show_fixed_radii(self, fixed_radii):
+        
         before = self.radii.pow(2).sum() / self.R**2 * 100
-        after = fix.pow(2).sum() / self.R**2 * 100
+        after = fixed_radii.pow(2).sum() / self.R**2 * 100
 
         fig = go.Figure()
         x = torch.arange(self.N)
         fig.add_trace(go.Bar(x=x, y=self.radii, name='radii', opacity=0.5))
-        fig.add_trace(go.Bar(x=x, y=fix, name='fix', opacity=0.5))
-        fig.update_layout(title=f'Fixed radii. FVF before {before:.1f}, after {after:.1f}', 
+        fig.add_trace(go.Bar(x=x, y=fixed_radii, name='fixed_radii', opacity=0.5))
+        fig.update_layout(title=f'Radii and fixed radii. FVF before {before:.1f}, after {after:.1f}', 
                 xaxis_title='Fibre ID', yaxis_title="Radii", 
                 width=self.figsize, height=self.figsize//2)
         
         fig = go.Figure()
         fig.add_trace(go.Histogram(x=self.radii, name='radii', opacity=0.5))
-        fig.add_trace(go.Histogram(x=fix, name='fix', opacity=0.5))
-        fig.update_layout(title=f'Fixed radii. FVF before {before:.1f}, after {after:.1f}', 
+        fig.add_trace(go.Histogram(x=fixed_radii, name='fix', opacity=0.5))
+        fig.update_layout(title=f'Radii and fixed radii distribution. FVF before {before:.1f}, after {after:.1f}', 
             xaxis_title='Radii', yaxis_title="Count", 
             width=self.figsize, height=self.figsize//2)
         fig.show()
-        return fix
     
     def save_result(self, filename, radii=None):
         
@@ -709,7 +710,7 @@ class FibrePacker():
         vertices = torch.cat(vertices, dim=0)
         faces = torch.cat(faces, dim=0)
         save_obj(filename, vertices, faces + 1)
-
+        print(f"Saved to {filename}")
         
            
 

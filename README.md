@@ -1,1 +1,4 @@
-Fibre packing using pytorch.
+Fibre packing optimized with pytorch.
+
+
+![Results](mosaic.png)
