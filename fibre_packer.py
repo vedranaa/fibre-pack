@@ -1,6 +1,7 @@
 #%%
 
 import torch
+import math
 import plotly.graph_objects as go
 from plotly.colors import qualitative
 from tqdm.notebook import tqdm
@@ -32,6 +33,9 @@ def protrusion_penalty(p, radii, R, delta=0):
 
 def separation_penalty(d, radii, n, delta=0):
     '''Separation to n nearest neighbors, part larger than delta.'''
+    n = min(n, len(radii) - 1)
+    if n < 1:
+        return torch.tensor(0)
     vals, inds = torch.topk(d, n + 1, largest=False)
     vals, inds = vals[:, 1:], inds[:, 1:]
     return torch.relu(vals - radii.unsqueeze(1) - radii[inds] - delta).pow(2).sum()
@@ -73,6 +77,7 @@ def animation_controls(Z):
     return layout
 
 def t2s(tensor):
+    '''Tensor to string, for exporting mesh.'''
     return ' '.join([str(x.item()) for x in tensor])
 
 def save_obj(filename, vertices, faces):
@@ -82,14 +87,21 @@ def save_obj(filename, vertices, faces):
         for i in range(faces.shape[0]):
             f.write(f'f {t2s(faces[i])} \n')
 
+def append_faces(filename, faces):
+    '''Appending faces to obj file, to close tube ends with polygons.'''
+    with open(filename, 'a') as f:
+        for i in range(faces.shape[0]):
+            f.write(f'f {t2s(faces[i])} \n')
+
 def make_tube_faces(z, n=8):
-    '''Zero-indexed faces'''
+    '''Zero-indexed faces of tube for exporting as mesh.'''
     k = torch.arange(n)
     strip = torch.stack((k, (k + 1)%n, (k + 1)%n + n, n + k), dim=1)
     tube = (torch.cat([strip + i * n for i in range(z - 1)], dim=0))
     return tube
 
 def make_tube_vertices(x, y, z, r, n=8):
+    '''Vertices of tube for exporting as mesh.'''
     if r.ndim == 0:
         r = r.unsqueeze(0)
     x, y, z, r = x.unsqueeze(1), y.unsqueeze(1), z.unsqueeze(1), r.unsqueeze(0)
@@ -102,6 +114,38 @@ def make_tube_vertices(x, y, z, r, n=8):
     vertices = torch.stack((X.flatten(), Y.flatten(), Z.flatten()), dim=1)
     return vertices
 
+def indices_to_coordinates(summary, configuration):
+    '''From indices of problematic fibres to coordinates.'''
+    x, y = configuration[summary[:,0], :, summary[:,1]].T
+    z = summary[:,0]
+    if summary.shape[1] == 3:  # when dealing with overlap we have 2 points
+        x2, y2 = configuration[summary[:,0], :, summary[:,2]].T
+        x, y = 0.5 * (x + x2) , 0.5 * (y + y2)
+    return x, y, z
+
+def overlap_for_configuration(configuration, min_d):
+    '''Overlap values and coordinates given a configuration, 
+    interpolated configuration, or a slice'''
+    if configuration.ndim == 2:  # Single slice case
+        configuration = configuration.unsqueeze(0)  # Add a Z dimension to handle slices
+    d = pairwise_distance(configuration)
+    overlap_matrix = torch.relu(torch.triu(torch.relu(min_d - d), diagonal=1))
+    overlap_indices = torch.nonzero(overlap_matrix)
+    overlap_values = overlap_matrix[torch.unbind(overlap_indices, dim=1)]        
+    overlap_coordinates = indices_to_coordinates(overlap_indices, configuration)
+    return overlap_values, overlap_coordinates
+
+def get_mapping_function(sigma=None, edge=None):
+    '''For mapping the signed distance field to intensity.'''
+    def f(x):
+        if sigma is None:
+            return 1 - torch.heaviside(x, torch.tensor(0.5))
+        hg = 1 - 0.5 * (1 + torch.special.erf(x / (2**0.5 * sigma)))
+        if edge is None:
+            return hg
+        else:
+            return hg - edge * x / sigma * torch.exp(0.5 * (1 - (x / sigma)**2))
+    return f
 
 # %% FibrePacker class
 
@@ -158,7 +202,7 @@ class FibrePacker():
         ai = torch.rand(self.N, generator=self.rng) * 2 * torch.pi
         self.p0 = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
     
-    def initialize_end_slice_original(self):
+    def initialize_end_slice_first_try(self):
         if self.p0 is None:
             print("Aborting. Start slice not initialized.")
             return
@@ -173,7 +217,11 @@ class FibrePacker():
         if self.p0 is None:
             print("Aborting. Start slice not initialized.")
             return
-        if misalignment=='very low':
+        self.pZ = self.p0.clone()
+    
+        if misalignment == 'none':
+            return
+        elif misalignment=='very low':
             angle_range = (0, 5)
             swap = (0.01, 3)
         elif misalignment=='low':
@@ -189,9 +237,7 @@ class FibrePacker():
             angle_range = (20, 25)
             swap = (0.16, 48)
 
-        self.pZ = self.p0.clone()
         clusters = self.cluster(k)
-
         da = angle_range[1] - angle_range[0]
         angles = - da + 2 * da * torch.rand(k + 1)
         angles = torch.sign(angles) * angle_range[0] + angles
@@ -200,7 +246,6 @@ class FibrePacker():
             self.rotate_cluster(cluster, angles[i])
         self.rotate_bundle((0, 0), 1, angles[-1])
         self.swap_points(swap[0], knn=swap[1])
-
 
 
     def interpolate_configuration(self, Z, z_multiplier=1, type='mixed'):
@@ -240,20 +285,22 @@ class FibrePacker():
         '''Rotate a bundle around a center.'''
         center = self.R * torch.tensor(center).unsqueeze(1)
         bundle = (self.pZ - center).norm(dim=0) + self.radii < self.R * radius
-        c, s = torch.cos(angle), torch.sin(angle)
+        c, s = math.cos(angle), math.sin(angle)
         R = torch.tensor([[c, -s], [s, c]])
         self.pZ[:, bundle] = R @ (self.pZ[:, bundle] - center) + center
 
     def rotate_cluster(self, cluster, angle):
         '''Rotate a bundle around a center.'''
         center = self.pZ[:, cluster].mean(dim=1, keepdim=True)
-        c, s = torch.cos(angle), torch.sin(angle)
+        c, s = math.cos(angle), math.sin(angle)
         R = torch.tensor([[c, -s], [s, c]])
         self.pZ[:, cluster] = R @ (self.pZ[:, cluster] - center) + center
 
     def swap_points(self, fraction, knn=36):
         '''Swap random (but relatively close) points.'''
         knn = min(knn, self.N//2) # consider k nearest neighbors for swapping
+        if knn < 2:
+            return
         d = pairwise_distance(self.pZ)
         inds = torch.topk(d, knn + 1, largest=False)[1]
         ri = torch.randint(1, knn, (self.N, ), generator=self.rng)
@@ -277,7 +324,8 @@ class FibrePacker():
                 width=self.figsize, height=self.figsize//2)
         fig.show()
     
-    def get_slice_circles(self, id):
+    def get_slice_circles(self, id, show_issues=False):
+        '''A helping function for show_slice, turns fibres to circles.'''
         p = None
         if id=='start':
             p = self.p0
@@ -295,11 +343,18 @@ class FibrePacker():
                     type="circle", fillcolor=self.color(i), opacity=0.5, line_width=0))
         shapes.append(dict(x0=-self.R, y0=-self.R, x1=self.R, y1=self.R,
                 type="circle", line_color='gray', opacity=0.5, line_width=5))
+
+        if show_issues:
+            overlap_values, overlap_coordinates = overlap_for_configuration(p, self.min_d)
+            xo, yo, _ = overlap_coordinates
+            for v, x, y in zip(overlap_values, xo, yo):
+                shapes.append(dict(x0=x - 2*v, y0=y - 2*v, x1=x + 2*v, y1=y + 2*v,
+                        type="rect", line_color='gray', opacity=0.5, line_width=1))  
         return shapes
 
-    def show_slice(self, id, title=None):
+    def show_slice(self, id, title=None, show_issues=False):
         fig = go.Figure()
-        shapes = self.get_slice_circles(id)
+        shapes = self.get_slice_circles(id, show_issues)
         if shapes is None:
             print(f"Aborting. Slice {id} not found.")
             return
@@ -346,12 +401,11 @@ class FibrePacker():
                 'width': self.figsize, 'height': self.figsize}
         return layout
 
-    def animate_slices(self, title=None, radii=None):
+    def animate_slices(self, title=None):
+        '''For some reason, showing issues is buggy in animation.'''
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
-        if radii is None:
-            radii = self.radii
         frames = []
         for z in range(self.Z):
             shapes = self.get_slice_circles(z)
@@ -379,7 +433,7 @@ class FibrePacker():
         return self.device
 
 
-    def optimize_slice_points(self, id, iters=200, delta=0.01, weights=None, lr=0.1, k=3):        
+    def optimize_slice_points(self, id, iters=200, delta=0.001, weights=None, lr=0.1, k=3):        
         if id == 'start':
             p = self.p0
         elif id == 'end':
@@ -438,7 +492,7 @@ class FibrePacker():
         return losses
 
 
-    def optimize_configuration(self, iters=200, delta=0.01, weights=None, lr=0.1):
+    def optimize_configuration(self, iters=200, delta=0.001, weights=None, lr=0.1):
         
         if self.configuration is None:
             print("Aborting. No configuration.")
@@ -510,61 +564,40 @@ class FibrePacker():
 
     # ADDITIONAL HELPING METHODS
 
-    def analyse_configuration(self, radii=None, return_=False):
-        '''Various measures about the result. Can be used with other radii.'''
+
+    def analyse_configuration(self):
+        '''Various measures about the result.'''
 
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
-
-        if radii is None:
-            radii = self.radii
-        
-        min_d = minimal_distance(radii)
-        self.configuration.requires_grad = False
-
+                
         def get_topk_indices(a, k=5):
+            '''Used for finding fibres that stretch or bend the most.'''
             k = min(k, a.shape[1]//2)
             _, j = torch.topk(a.flatten(), k)
             j = j.unsqueeze(1)
             return torch.cat((j//a.shape[1], j%a.shape[1]), dim=1)
+  
 
-        def indices_to_coordinates(summary):
-            x, y = self.configuration[summary[:,0], :, summary[:,1]].T
-            z = summary[:,0]
-            if summary.shape[1] == 3:
-                x2, y2 = self.configuration[summary[:,0], :, summary[:,2]].T
-                x, y = 0.5 * (x + x2) , 0.5 * (y + y2)
-            return x, y, z
-
-        def overlap_for_conf(conf):
-            d = pairwise_distance(conf)
-            overlap_matrix = torch.relu(torch.triu(torch.relu(min_d - d), diagonal=1))
-            overlap_indices = torch.nonzero(overlap_matrix)
-            overlap_values = overlap_matrix[torch.unbind(overlap_indices, dim=1)]
-            overlap_coordinates = indices_to_coordinates(overlap_indices)
-            return overlap_values, overlap_coordinates
-
-        overlap_values, overlap_coordinates = overlap_for_conf(self.configuration)
-        overlap_mid_values, omc = overlap_for_conf(0.5 * (self.configuration[1:] 
-                    + self.configuration[:-1]))
+        overlap_values, overlap_coordinates = overlap_for_configuration(self.configuration, self.min_d)
+        overlap_mid_values, omc = overlap_for_configuration(0.5 * (self.configuration[1:] 
+                    + self.configuration[:-1]), self.min_d)
         overlap_mid_coordinates = (omc[0], omc[1], omc[2] + 0.5) 
     
-        protrusion_matrix = torch.relu(self.configuration.norm(dim=-2) + radii - self.R)
+        protrusion_matrix = torch.relu(self.configuration.norm(dim=-2) + self.radii - self.R)
         protrusion_indices = torch.nonzero(protrusion_matrix)
         protrusion_values = protrusion_matrix[torch.unbind(protrusion_indices, dim=1)]
-        protrusion_coordinates = indices_to_coordinates(protrusion_indices)
+        protrusion_coordinates = indices_to_coordinates(protrusion_indices, self.configuration)
 
         stretching_matrix = (1/2)**2 * (self.configuration[2:] 
             - 2 * self.configuration[1:-1] + self.configuration[:-2]).pow(2).sum(dim=1)
         stretching_summary = get_topk_indices(stretching_matrix) + torch.tensor([1, 0])
-        stretching_coordinates = indices_to_coordinates(stretching_summary)
         
         bending_matrix = (1/6)**2 * (- self.configuration[4:] 
             + 4 * self.configuration[3:-1] - 6 * self.configuration[2:-2] 
             + 4 * self.configuration[1:-3] - self.configuration[:-4]).pow(2).sum(dim=1)
         bending_summary = get_topk_indices(bending_matrix) + torch.tensor([2, 0])
-        bending_coordinates = indices_to_coordinates(bending_summary)
 
         analysis = {
             'overlap_values': overlap_values,
@@ -573,9 +606,7 @@ class FibrePacker():
             'overlap_mid_coordinates': overlap_mid_coordinates,
             'protrusion_values': protrusion_values,
             'protrusion_coordinates': protrusion_coordinates,
-            'stretching_coordinates': stretching_coordinates,
             'stretching_summary': stretching_summary,
-            'bending_coordinates': bending_coordinates,
             'bending_summary': bending_summary
         } 
         return analysis
@@ -614,9 +645,7 @@ class FibrePacker():
         for id in ['stretching', 'bending']:
             for i in analysis[id + '_summary'][:, 1]:
                 fig.add_trace(go.Scatter3d(x=x[:, i], y=y[:, i], z=z, 
-                    line_color = c[id], opacity=0.5, mode='lines', line=dict(width=6)))
-            cx, cy, cz = analysis[id + '_coordinates']
-            fig.add_trace(go.Scatter3d(x=cx, y=cy, z=cz, mode='markers', opacity=0.75, marker={'color': c[id], 'symbol':'cross'}))
+                    line_color = c[id], opacity=0.25, mode='lines', line=dict(width=6)))
 
         fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y',
             zaxis_title='Z', aspectmode='cube'), showlegend=False,
@@ -670,39 +699,36 @@ class FibrePacker():
             width=self.figsize, height=self.figsize//2)
         fig.show()
     
-    def save_result(self, filename, radii=None):
+    def save_result(self, filename):
         
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
 
-        if radii is None:
-            radii = self.radii
         x, y = self.configuration.transpose(0, 1)
         with open(filename, 'w') as f:
-            for xi, yi, ri in zip(x.T, y.T, radii):
+            for xi, yi, ri in zip(x.T, y.T, self.radii):
                 f.write(f"{ri:.6f}\n")
                 f.write(" ".join(f"{i:.6f}" for i in xi) + "\n")
                 f.write(" ".join(f"{i:.6f}" for i in yi) + "\n")
         print(f"Saved to {filename}")
 
     
-    def save_mesh(self, filename, radii=None, n=16):
+    def save_mesh(self, filename, close_ends=False, n=16):
 
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
         
-        if radii is None:
-            radii = self.radii
         x, y = self.configuration.transpose(0, 1)
         z = torch.arange(self.Z) * self.z_multiplier
+        z = z - z[-1]/2
 
         tube = make_tube_faces(self.Z, n)
-
+            
         faces = []
         vertices = []
-        for i, (xi, yi, ri) in enumerate(zip(x.T, y.T, radii)):
+        for i, (xi, yi, ri) in enumerate(zip(x.T, y.T, self.radii)):
 
             vertices.append(make_tube_vertices(xi, yi, z, ri, n))
             faces.append(tube + self.Z * n * i)
@@ -710,7 +736,84 @@ class FibrePacker():
         vertices = torch.cat(vertices, dim=0)
         faces = torch.cat(faces, dim=0)
         save_obj(filename, vertices, faces + 1)
+
+        if close_ends:
+            end = torch.stack((torch.arange(n), 
+                    torch.arange((self.Z - 1) * n, self.Z * n)))
+            ends = torch.cat([end + i * n * self.Z for i in range(self.N)], dim=0)
+            append_faces(filename, ends + 1)
+
         print(f"Saved to {filename}")
-        
-           
+
+    def resample(self, new_z):
+        if type(new_z) is int:
+            new_z = torch.linspace(0, self.Z - 1, new_z)
+        new_size = (len(new_z), 2, self.N)
+        new_configuration = torch.empty(size=new_size, dtype=self.configuration.dtype)
+        for i, s in enumerate(new_z):
+            f, c = math.floor(s), math.ceil(s)
+            if f == c:
+                new_configuration[i] = self.configuration[int(f)]
+            else:
+                new_configuration[i] = (self.configuration[int(f)] * (c - s) 
+                        + self.configuration[int(c)] * (s - f))
+        return new_configuration
+
+    def project(self, thetas, bins, new_z=None):
+        if new_z is None:
+            configuration = self.configuration
+        else:
+            configuration = self.resample(new_z)
+        if type(bins) is int:
+            bins = torch.linspace(-self.R, self.R, bins)
+        if type(thetas) is int:
+            thetas = torch.arange(0, thetas) * torch.pi / thetas
+        bins = bins.unsqueeze(0).unsqueeze(2)
+        radii = self.radii.unsqueeze(0).unsqueeze(0)
+        x, y = configuration.transpose(0, 1)
+        x, y = x.unsqueeze(1), y.unsqueeze(1)
+        p = []
+        for theta in thetas:
+            f = math.cos(theta) * x + math.sin(theta) * y
+            g = 2 * (torch.relu(radii**2 - (bins - f)**2)).pow(0.5)
+            p.append(g.sum(dim=2))
+        return torch.stack(p, dim=0)
+    
+    def select_mapping_function(self, transition=None):
+        if transition is None:
+            mapping_function = get_mapping_function()
+        elif type(transition) is str:
+            r = self.radii.mean()
+            if transition == 'smooth':
+                mapping_function = get_mapping_function(sigma=0.1 * r)
+            elif tranistion == 'enhanced':
+                mapping_function = get_mapping_function(sigma=0.1 * r, edge=0.5)
+        elif type(transition) is tuple:
+            mapping_function = get_mapping_function(sigma=transition[0], edge=transition[1])
+        return mapping_function
+    
+            
+    def voxelize(self, pixels=None, new_z=None, transition=None):
+        if new_z is None:
+            configuration = self.configuration
+        else:
+            configuration = self.resample(new_z)
+        if pixels is None:
+            pixels = torch.arange(-self.R, self.R, 1)
+        elif type(pixels) is int:
+            pixels = torch.linspace(-self.R, self.R, pixels)
+        elif type(pixels) is not torch.Tensor:
+            pixels = torch.tensor(pixels)
+        X, Y = torch.meshgrid(pixels, pixels, indexing='xy')
+        X, Y = X.unsqueeze(0).unsqueeze(3), Y.unsqueeze(0).unsqueeze(3)
+        radii = self.radii.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        x, y = configuration.transpose(0, 1)
+        x, y = x.unsqueeze(1).unsqueeze(1), y.unsqueeze(1).unsqueeze(1)
+        df = ((X - x).pow(2) + (Y - y).pow(2)).pow(0.5) - radii
+        df = df.min(dim=3)[0]
+
+        mapping_function = self.select_mapping_function(transition)
+        df = mapping_function(df)
+
+        return df
 
