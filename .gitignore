@@ -12,4 +12,4 @@ __pycache__/
 # IPython
 profile_default/
 ipython_config.py
-/batch_first
+/batch_*

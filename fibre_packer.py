@@ -1,14 +1,15 @@
 #%%
 
 import torch
-import math
+import numpy as np
 import plotly.graph_objects as go
 from plotly.colors import qualitative
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm  # problems with container width
+# from tqdm import tqdm
 
 RNG = torch.Generator().manual_seed(13)
 
-## Helping functions    
+## HELPING FUNCTIONS
 def minimal_distance(radii):
     '''Minimal non-overlap distance between circles with given radii.'''
     min_d = radii.unsqueeze(1) + radii.unsqueeze(0)
@@ -54,7 +55,7 @@ def boundary_penalty(conf, p0, pZ):
     '''Penalty for deviation from boundary conditions.'''
     return (conf[0] - p0).pow(2).sum() + (conf[-1] - pZ).pow(2).sum()
 
-def animation_controls(Z):
+def animation_controls(Z, prefix='Slice '):
     '''Animation controls for Z slices.'''
     layout = go.Layout(
         updatemenus=[{"buttons": [
@@ -71,10 +72,29 @@ def animation_controls(Z):
                 "label": str(z), "method": "animate"} for z in range(Z)],
             "x": 0.2, "len": 0.8, "xanchor": "left", "y": 0, "yanchor": "top",
             "pad": {"b": 10, "t": 10},
-            "currentvalue": {"font": {"size": 15}, "prefix": "Slice:",
+            "currentvalue": {"font": {"size": 15}, "prefix": prefix,
                 "visible": True, "xanchor": "right"},
             "transition": {"duration": 300, "easing": "cubic-in-out"}}])
     return layout
+
+def animate(volume, prefix='Slice ', figsize=600):
+    '''Animate slices of a given volume.'''
+    if type(volume) is torch.Tensor:
+        volume = volume.numpy()
+    vmin = volume.min()
+    vrange = volume.max() - vmin
+    nr_slices = volume.shape[0]
+    frames = []
+    for i in range(nr_slices):
+        s = volume[i]
+        s = (255 * (s - vmin) / vrange).astype(np.uint8)
+        image = np.stack([s, s, s], axis=-1)  # plotly wants rgb image
+        frames.append(go.Frame(data=[go.Image(z=image)], name=str(i)))
+    layout = animation_controls(nr_slices, prefix=prefix)
+    layout.update({'width': figsize, 'height': figsize})
+    fig = go.Figure(layout=layout, frames=frames)
+    fig.add_trace(frames[0].data[0])
+    fig.show()
 
 def t2s(tensor):
     '''Tensor to string, for exporting mesh.'''
@@ -123,7 +143,7 @@ def indices_to_coordinates(summary, configuration):
         x, y = 0.5 * (x + x2) , 0.5 * (y + y2)
     return x, y, z
 
-def overlap_for_configuration(configuration, min_d):
+def overlap_for_configuration(configuration, min_d, return_coordinates=True):
     '''Overlap values and coordinates given a configuration, 
     interpolated configuration, or a slice'''
     if configuration.ndim == 2:  # Single slice case
@@ -131,7 +151,9 @@ def overlap_for_configuration(configuration, min_d):
     d = pairwise_distance(configuration)
     overlap_matrix = torch.relu(torch.triu(torch.relu(min_d - d), diagonal=1))
     overlap_indices = torch.nonzero(overlap_matrix)
-    overlap_values = overlap_matrix[torch.unbind(overlap_indices, dim=1)]        
+    overlap_values = overlap_matrix[torch.unbind(overlap_indices, dim=1)]
+    if not return_coordinates:
+        return overlap_values
     overlap_coordinates = indices_to_coordinates(overlap_indices, configuration)
     return overlap_values, overlap_coordinates
 
@@ -147,7 +169,8 @@ def get_mapping_function(sigma=None, edge=None):
             return hg - edge * x / sigma * torch.exp(0.5 * (1 - (x / sigma)**2))
     return f
 
-# %% FibrePacker class
+
+## FIBRE PACKER CLASS
 
 def from_n(R, N, r_mean, r_sigma=0, rng=None):
     fib = FibrePacker()
@@ -162,6 +185,7 @@ def from_n(R, N, r_mean, r_sigma=0, rng=None):
     else:
         radii = r_mean * torch.ones(N)
     fib.set_radii(radii)
+    fib.set_weights()
     return fib
 
 def from_fvf(R, fvf, r_mean, r_sigma=0, rng=None):
@@ -178,35 +202,68 @@ class FibrePacker():
         self.N = None
         self.Z = None
         
-        self.p0 = None
-        self.pZ = None
+        self.boundaries = {'start': None, 'end': None}
         self.configuration = None
     
         self.device = None
         self.rng = torch.Generator().manual_seed(13)
-        self.colors = qualitative.Plotly
-        self.figsize = 600
-        self.tqdmformat = '{desc:<50}{bar}{n_fmt}/{total_fmt}'
-        self.tqdmwidth = 600
+        self.learning_rate = 0.05
         
+        self.slice_weights = {
+                'overlap': None, 
+                'separation': None, 
+                'protrusion': None
+                }
+        self.configuration_weights = {
+            'overlap': None,
+            'protrusion': None,
+            'crossover': None,
+            'stretching': None,
+            'bending': None,
+            'boundary': None
+        }
+        self.separation_neighbors = 3
+        self.overlap_delta = 0.01
+        
+        self.colors = qualitative.Plotly
+        self.figsize = 600  # in pixels
+        self.tqdmformat = '{desc:<50}{bar}{n_fmt}/{total_fmt}'
+        self.tqdmwidth = 600  # in pixels for tqdm.notebook, else in characters
+        
+    ### INITIALIZATION METHODS
+
+    def set_weights(self):
+        
+        self.slice_weights = {
+            'overlap': 1, 
+            'separation': 1/1000,
+            'protrusion': 1,
+            }
+        self.configuration_weights = {
+            'overlap': 1, 
+            'protrusion': 1,
+            'crossover': 1,
+            'stretching': 1/100,
+            'bending': 1/100,
+            'boundary': 1
+            }
+
     def set_radii(self, radii):
         self.radii = radii
         self.N = len(radii)
         self.min_d = minimal_distance(radii)
 
-    ## MAIN WORKFLOW METHODS
-    
     def initialize_start_slice(self):
         max_R = self.R - self.radii.max()
         ri = max_R * torch.sqrt(torch.rand(self.N, generator=self.rng))
         ai = torch.rand(self.N, generator=self.rng) * 2 * torch.pi
-        self.p0 = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
+        self.boundaries['start'] = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
     
     def initialize_end_slice_first_try(self):
-        if self.p0 is None:
+        if self.boundaries['start'] is None:
             print("Aborting. Start slice not initialized.")
             return
-        self.pZ = self.p0.clone()
+        self.boundaries['end'] = self.boundaries['start'].clone()
         self.rotate_bundle((1/2, 0), 1/2.5, torch.tensor(-torch.pi/2))
         self.rotate_bundle((1/2, 0), 1/2, torch.tensor(-torch.pi/3))
         self.rotate_bundle((0, 0), 1, torch.tensor(torch.pi/4))
@@ -214,28 +271,33 @@ class FibrePacker():
 
     def initialize_end_slice(self, misalignment, k=3):
         # k is the number of clusters
-        if self.p0 is None:
+        if self.boundaries['start'] is None:
             print("Aborting. Start slice not initialized.")
             return
-        self.pZ = self.p0.clone()
+        self.boundaries['end'] = self.boundaries['start'].clone()
     
         if misalignment == 'none':
             return
         elif misalignment=='very low':
             angle_range = (0, 5)
             swap = (0.01, 3)
+            noise = 0.1
         elif misalignment=='low':
             angle_range = (5, 10)
             swap = (0.02, 6)
+            noise = 0.2
         elif misalignment=='moderate':
             angle_range = (10, 15)
             swap = (0.04, 12)
+            noise = 0.4
         elif misalignment=='high':
             angle_range = (15, 20)
             swap = (0.08, 24)
+            noise = 0.8
         elif misalignment=='very high':
             angle_range = (20, 25)
             swap = (0.16, 48)
+            noise = 1.6
 
         clusters = self.cluster(k)
         da = angle_range[1] - angle_range[0]
@@ -246,11 +308,12 @@ class FibrePacker():
             self.rotate_cluster(cluster, angles[i])
         self.rotate_bundle((0, 0), 1, angles[-1])
         self.swap_points(swap[0], knn=swap[1])
+        self.perturb_points('end', noise)
 
 
     def interpolate_configuration(self, Z, z_multiplier=1, type='mixed'):
-        if (self.p0 is None) or (self.pZ is None):
-            print("Aborting. Terminal slices not initialized.")
+        if (self.boundaries['start'] is None) or (self.boundaries['end'] is None):
+            print("Aborting. Boundary slices not initialized.")
             return
         if type == 'linear':
             w = torch.linspace(0, 1, Z)
@@ -262,20 +325,19 @@ class FibrePacker():
             w = (w - w[0]) / (w[-1] - w[0])
             w = 0.5 * (w + torch.linspace(0, 1, Z))
         w = w.view(Z, 1, 1)
-        self.configuration = (1 - w) * self.p0 + w * self.pZ
+        self.configuration = (1 - w) * self.boundaries['start'] + w * self.boundaries['end']
         self.Z = Z
         self.z_multiplier = z_multiplier
     
-
     def cluster(self, k):
         '''Very rough clustering of points.'''
         kappa = 0.5  # if 1 all points are clustered, if 0 many are not
-        c = self.p0[:, torch.randperm(self.N, generator=self.rng)[:k] ] # initial centers
+        c = self.boundaries['start'][:, torch.randperm(self.N, generator=self.rng)[:k] ] # initial centers
         for step in range(10): 
-            d = pairwise_distance(self.p0, c).min(dim=1).indices
-            c = torch.stack([self.p0[:, d==i].mean(dim=1) for i in range(k)], dim=1)
+            d = pairwise_distance(self.boundaries['start'], c).min(dim=1).indices
+            c = torch.stack([self.boundaries['start'][:, d==i].mean(dim=1) for i in range(k)], dim=1)
 
-        v, d = pairwise_distance(self.p0, c).min(dim=1)
+        v, d = pairwise_distance(self.boundaries['start'], c).min(dim=1)
         r = kappa * v.max() + (1 - kappa) * v.mean()  # somewhere between the mean and the max
         d[v > r] = -1  # remove points that are too far 
         clusters = [d==i for i in range(k)]
@@ -284,24 +346,24 @@ class FibrePacker():
     def rotate_bundle(self, center, radius, angle):
         '''Rotate a bundle around a center.'''
         center = self.R * torch.tensor(center).unsqueeze(1)
-        bundle = (self.pZ - center).norm(dim=0) + self.radii < self.R * radius
-        c, s = math.cos(angle), math.sin(angle)
-        R = torch.tensor([[c, -s], [s, c]])
-        self.pZ[:, bundle] = R @ (self.pZ[:, bundle] - center) + center
+        bundle = (self.boundaries['end'] - center).norm(dim=0) + self.radii < self.R * radius
+        c, s = np.cos(angle), np.sin(angle)
+        R = torch.tensor([[c, -s], [s, c]], dtype=torch.float)
+        self.boundaries['end'][:, bundle] = R @ (self.boundaries['end'][:, bundle] - center) + center
 
     def rotate_cluster(self, cluster, angle):
         '''Rotate a bundle around a center.'''
-        center = self.pZ[:, cluster].mean(dim=1, keepdim=True)
-        c, s = math.cos(angle), math.sin(angle)
-        R = torch.tensor([[c, -s], [s, c]])
-        self.pZ[:, cluster] = R @ (self.pZ[:, cluster] - center) + center
+        center = self.boundaries['end'][:, cluster].mean(dim=1, keepdim=True)
+        c, s = np.cos(angle), np.sin(angle)
+        R = torch.tensor([[c, -s], [s, c]], dtype=torch.float)
+        self.boundaries['end'][:, cluster] = R @ (self.boundaries['end'][:, cluster] - center) + center
 
     def swap_points(self, fraction, knn=36):
         '''Swap random (but relatively close) points.'''
         knn = min(knn, self.N//2) # consider k nearest neighbors for swapping
         if knn < 2:
             return
-        d = pairwise_distance(self.pZ)
+        d = pairwise_distance(self.boundaries['end'])
         inds = torch.topk(d, knn + 1, largest=False)[1]
         ri = torch.randint(1, knn, (self.N, ), generator=self.rng)
         pairs = torch.stack((torch.arange(self.N), 
@@ -310,9 +372,13 @@ class FibrePacker():
         pairs = torch.unique(pairs, dim=0)
         pairs = pairs[torch.randperm(pairs.shape[0], generator=self.rng)]
         for pair in pairs[:int(fraction * self.N)]:
-            self.pZ[:, pair] = self.pZ[:, pair.flip(0)]
+            self.boundaries['end'][:, pair] = self.boundaries['end'][:, pair.flip(0)]
 
-    ## VISUALIZATION METHODS
+    def perturb_points(self, id, sigma):
+        sigma *= self.radii.mean()
+        self.boundaries[id] += sigma * torch.randn(size=self.boundaries[id].shape, generator=self.rng)
+
+    ### VISUALIZATION METHODS
 
     def show_radii_distribution(self, nbins=100):
         # I don't know exactly how plotly computes number of bins from nbinsx
@@ -327,10 +393,8 @@ class FibrePacker():
     def get_slice_circles(self, id, show_issues=False):
         '''A helping function for show_slice, turns fibres to circles.'''
         p = None
-        if id=='start':
-            p = self.p0
-        elif id=='end':
-            p = self.pZ
+        if (id=='start') or (id=='end'):
+            p = self.boundaries[id]
         else:
             if self.configuration is not None:
                 p = self.configuration[id]
@@ -402,7 +466,6 @@ class FibrePacker():
         return layout
 
     def animate_slices(self, title=None):
-        '''For some reason, showing issues is buggy in animation.'''
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
@@ -419,8 +482,7 @@ class FibrePacker():
             fig.update_layout(title=title)
         fig.show()
     
-
-    # OPTIMIZATION METHODS
+    ### OPTIMIZATION METHODS
 
     def select_device(self):
         if torch.cuda.is_available():
@@ -432,26 +494,16 @@ class FibrePacker():
         print(f"Using device {self.device}")
         return self.device
 
-
-    def optimize_slice_points(self, id, iters=200, delta=0.001, weights=None, lr=0.1, k=3):        
-        if id == 'start':
-            p = self.p0
-        elif id == 'end':
-            p = self.pZ
-
+    def optimize_slice(self, id, iters=200):        
+        p = self.boundaries[id]
         if p is None:
             print("Aborting. Slice not initialized.")
             return
         
-        delta = delta * self.radii.mean()
+        delta = self.overlap_delta * self.radii.mean()
+        weights = self.slice_weights
+        k = self.separation_neighbors
         
-        default_weights = {'overlap': 1, 
-                'separation': 1/self.N,
-                'protrusion': self.N}
-        if weights is not None:
-            default_weights.update(weights)
-        weights = default_weights
-                
         if self.device is None:
             self.select_device()
 
@@ -459,8 +511,8 @@ class FibrePacker():
         p.requires_grad = True
         min_d = self.min_d.to(self.device)
         radii = self.radii.to(self.device)
-        
-        optimizer = torch.optim.Adam([p], lr=lr)
+
+        optimizer = torch.optim.Adam([p], lr=self.learning_rate)
         losses = {key: [] for key in weights.keys()}
         progress_bar = tqdm(range(iters), bar_format=self.tqdmformat, 
                 ncols=self.tqdmwidth)
@@ -484,21 +536,17 @@ class FibrePacker():
                 f"Over. {overlap:.2f}, sep. {separation:.2f}, prot. {protrusion:.1f}",
                 refresh=True)
 
-        if id == 'start':
-            self.p0 = p.detach().to('cpu')
-        elif id == 'end':
-            self.pZ = p.detach().to('cpu')  
+        self.boundaries[id] = p.detach().to('cpu')
 
         return losses
 
 
-    def optimize_configuration(self, iters=200, delta=0.001, weights=None, lr=0.1):
-        
+    def optimize_configuration(self, iters=200):
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
         
-        delta = delta * self.radii.mean()
+        delta = self.overlap_delta * self.radii.mean()
 
         if self.device is None:
             self.select_device()
@@ -507,20 +555,12 @@ class FibrePacker():
         configuration.requires_grad = True
         min_d = self.min_d.to(self.device)
         radii = self.radii.to(self.device)
-        p0 = self.p0.to(self.device)
-        pZ = self.pZ.to(self.device)
+        p0 = self.boundaries['start'].to(self.device)
+        pZ = self.boundaries['end'].to(self.device)
 
-        default_weights = {'overlap': 1, 
-                        'crossover': 1,
-                        'protrusion': self.N, 
-                        'stretching': 1/self.N,
-                        'bending': 1/self.N,
-                        'boundary': 1}
-        if weights is not None:
-            default_weights.update(weights)
-        weights = default_weights
-    
-        optimizer = torch.optim.Adam([configuration], lr=lr)
+        weights = self.configuration_weights
+
+        optimizer = torch.optim.Adam([configuration], lr=self.learning_rate)
         losses = {key: [] for key in weights.keys()}
         progress_bar = tqdm(range(iters), bar_format=self.tqdmformat, 
                 ncols=self.tqdmwidth)
@@ -562,10 +602,76 @@ class FibrePacker():
         return losses
 
 
-    # ADDITIONAL HELPING METHODS
+    def optimize_slice_heuristic(self, id, iters, repetitions=10, 
+            change_every=3, show_figures=False):
+        '''Temporary reduces separation.'''
+        sn = self.separation_neighbors
+        sw = self.slice_weights['separation']
+        quality = -1, 'unknown'
+        best_quality = quality
+        iter = 0
+        while iter < repetitions:
+            if iter > 0: 
+                self.perturb_points(id, sigma=0.1)
+                if iter % change_every == 0:
+                    self.separation_neighbors = max(self.separation_neighbors - 1, 1)  
+                    self.slice_weights['separation'] /= 100
+            losses = self.optimize_slice(id, iters=iters)
+            if show_figures:
+                self.show_losses(losses)
+                self.show_slice(id, f'Optimized {id} slice', show_issues=False)
+            quality = self.assess_analysis_summary(id)
+            print(f'Quality {quality[1]}, repetition {iter}/{repetitions}')
+            if quality[1] == 'perfect':
+                self.separation_neighbors = sn
+                self.slice_weights['separation'] = sw
+                return losses
+            elif quality[0] > best_quality[0]:
+                best_quality = quality
+                best_slice = self.boundaries[id]
+                best_losses = losses
+            iter += 1
+        else:
+            print(f'Using best quality {best_quality[1]}')
+            self.boundaries[id] = best_slice
+            self.separation_neighbors = sn
+            self.slice_weights['separation'] = sw
+            return losses
+            
+    def optimize_configuration_heuristic(self, iters, repetitions=10, 
+            change_every=3, show_figures=False):
+        '''Temporary reduces stretching, bending and boundary.'''
+        quality = -1, 'unknown'
+        cw = self.configuration_weights.copy()
+        best_quality = quality
+        iter = 0
+        while iter < repetitions:
+            if (iter > 0) and (iter % change_every == 0):
+                    self.configuration_weights['stretching'] /= 2
+                    self.configuration_weights['bending'] /= 2
+                    self.configuration_weights['boundary'] /= 2
+            losses = self.optimize_configuration(iters=iters)
+            if show_figures:
+                self.show_losses(losses)
+            quality = self.assess_analysis_summary(id)
+            print(f'Quality {quality[1]}, repetition {iter}/{repetitions}')
+            if quality[1] == 'perfect':
+                self.configuration_weights = cw
+                return losses
+            elif quality[0] > best_quality[0]:
+                best_quality = quality
+                best_configuration = self.configuration
+                best_losses = losses
+            iter += 1
+        else:
+            print(f'Using best quality {best_quality[1]}')
+            self.configuration = best_configuration
+            self.configuration_weights = cw
+            return losses
 
+    ### ANALYSIS METHODS
 
-    def analyse_configuration(self):
+    def get_full_analysis(self):
         '''Various measures about the result.'''
 
         if self.configuration is None:
@@ -578,7 +684,6 @@ class FibrePacker():
             _, j = torch.topk(a.flatten(), k)
             j = j.unsqueeze(1)
             return torch.cat((j//a.shape[1], j%a.shape[1]), dim=1)
-  
 
         overlap_values, overlap_coordinates = overlap_for_configuration(self.configuration, self.min_d)
         overlap_mid_values, omc = overlap_for_configuration(0.5 * (self.configuration[1:] 
@@ -611,6 +716,60 @@ class FibrePacker():
         } 
         return analysis
     
+    def get_analysis_summary(self, id = None):
+
+        if (id == 'start') or (id == 'end'):
+            p = self.boundaries[id]
+        else:
+            p = self.configuration
+        if p is None:
+            print("Aborting. No slice or configuration.")
+            return
+                
+        overlap = overlap_for_configuration(p, self.min_d, return_coordinates=False)
+        protrusion = torch.relu(p.norm(dim=-2) + self.radii - self.R)
+        protrusion = protrusion[torch.unbind(torch.nonzero(protrusion), dim=1)]
+
+        if id is not None:
+            return overlap, protrusion
+        
+        else:
+            overlap_mid_values = overlap_for_configuration(0.5 * (p[1:] 
+                        + p[:-1]), self.min_d, return_coordinates = False)
+            return overlap, protrusion, overlap_mid_values
+
+    def assess_analysis_summary(self, id = None):
+        
+        if (id=='start') or (id=='end'):
+            overlap, protrusion = self.get_analysis_summary(id)
+            overlap_mid = torch.tensor([])
+            n = self.N 
+        else:
+            overlap, protrusion, overlap_mid =self.get_analysis_summary()
+            n = self.N * self.Z
+
+        no = overlap.nelement()
+        np = protrusion.nelement()
+        nom = overlap_mid.nelement()
+
+        if (no == 0) and (np == 0) and (nom == 0):
+            return 5, 'perfect'
+        mo = overlap.max() if no>0 else 0
+        mp = protrusion.max() if np>0 else 0
+        mom = overlap_mid.max() if nom>0 else 0
+
+        mean_r = self.radii.mean()
+        if (no < 0.01 * n and mo < 0.05 * mean_r and
+            nom < 0.01 * n and mom < 0.05 * mean_r and 
+            mp < 0.001 * n and mp < 0.01 * mean_r):
+            return 4, 'great'
+        if (no < 0.02 * n and mo < 0.1 * mean_r and
+            nom < 0.02 * n and mom < 0.1 * mean_r and 
+            mp < 0.002 * n and mp < 0.02 * mean_r):
+            return 3, 'ok'
+        # mediocre
+        return 2, 'bad'
+        
     def show_analysis_distribution(self, analysis, title, nbins=50):
         fig = go.Figure()
         for id in ['overlap', 'overlap_mid', 'protrusion']:
@@ -622,7 +781,6 @@ class FibrePacker():
 
         
     def show_3D_configuration_analysis(self, analysis, title=None):
-
         x, y = self.configuration.transpose(0, 1)
         z = torch.arange(self.Z)
         fig = go.Figure()
@@ -655,7 +813,6 @@ class FibrePacker():
         fig.show()
     
     def fix_radii(self, epsilon=1e-3):
-
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
@@ -677,11 +834,15 @@ class FibrePacker():
         fixed_radii = self.radii - fix
         return fixed_radii
 
+    def get_fvp(self, radii=None):
+        if radii is None:
+            return self.radii.pow(2).sum() / self.R**2 * 100
+        else:
+            return radii.pow(2).sum() / self.R**2 * 100
 
-    def show_fixed_radii(self, fixed_radii):
-        
-        before = self.radii.pow(2).sum() / self.R**2 * 100
-        after = fixed_radii.pow(2).sum() / self.R**2 * 100
+    def show_fixed_radii(self, fixed_radii):     
+        before = self.get_fvp()
+        after = self.get_fvp(fixed_radii)
 
         fig = go.Figure()
         x = torch.arange(self.N)
@@ -698,7 +859,9 @@ class FibrePacker():
             xaxis_title='Radii', yaxis_title="Count", 
             width=self.figsize, height=self.figsize//2)
         fig.show()
-    
+
+    ### I/O METHODS
+
     def save_result(self, filename):
         
         if self.configuration is None:
@@ -745,13 +908,15 @@ class FibrePacker():
 
         print(f"Saved to {filename}")
 
+    ###  PROJECT AND VOXELIZE METHODS
+
     def resample(self, new_z):
         if type(new_z) is int:
             new_z = torch.linspace(0, self.Z - 1, new_z)
         new_size = (len(new_z), 2, self.N)
         new_configuration = torch.empty(size=new_size, dtype=self.configuration.dtype)
         for i, s in enumerate(new_z):
-            f, c = math.floor(s), math.ceil(s)
+            f, c = np.floor(s), np.ceil(s)
             if f == c:
                 new_configuration[i] = self.configuration[int(f)]
             else:
@@ -774,7 +939,7 @@ class FibrePacker():
         x, y = x.unsqueeze(1), y.unsqueeze(1)
         p = []
         for theta in thetas:
-            f = math.cos(theta) * x + math.sin(theta) * y
+            f = np.cos(theta) * x + np.sin(theta) * y
             g = 2 * (torch.relu(radii**2 - (bins - f)**2)).pow(0.5)
             p.append(g.sum(dim=2))
         return torch.stack(p, dim=0)
@@ -791,8 +956,7 @@ class FibrePacker():
         elif type(transition) is tuple:
             mapping_function = get_mapping_function(sigma=transition[0], edge=transition[1])
         return mapping_function
-    
-            
+     
     def voxelize(self, pixels=None, new_z=None, transition=None):
         if new_z is None:
             configuration = self.configuration
