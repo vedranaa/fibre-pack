@@ -310,7 +310,8 @@ class FibrePacker():
         self.swap_points(swap[0], knn=swap[1])
         self.perturb_points('end', noise)
 
-
+    # TODO add staggered type where each fibre has different profile 
+    # with different z-position of the fastest  movement
     def interpolate_configuration(self, Z, z_multiplier=1, type='mixed'):
         if (self.boundaries['start'] is None) or (self.boundaries['end'] is None):
             print("Aborting. Boundary slices not initialized.")
