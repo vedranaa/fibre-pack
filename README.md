@@ -1,6 +1,6 @@
 # fibre_packer
 
-Fibre packing optimized with PyTorch. This module provides tools for generating, optimizing, and analyzing 2D and 3D fibre packings with customizable fibre volume fraction (FVF) and misalignment. It is designed for use in computational materials science, especially for simulating fibre-reinforced composites.
+Fibre packing optimized with PyTorch. This module provides tools for generating, optimizing, and analyzing 2D and 3D fibre packings with customizable fibre volume fraction (FVF) and misalignment. Achieved FVF values (shown in parentheses in the figure below) closely match the targets, even at high FVF and significant misalignment. The module is designed for use in computational materials science, especially for simulating fibre-reinforced composites. 
 
 ![Results](mosaic.png)
 
