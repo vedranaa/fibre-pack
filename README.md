@@ -4,13 +4,7 @@ Fibre packing optimized with PyTorch. This module provides tools for generating,
 
 ![Results](mosaic.png)
 
-[![Watch the video](tumbnail.jpeg)](animation.m4v)
-
-[![Watch the video](https://raw.githubusercontent.com/vedranaa/fibre-pack/main/thumbnail.jpg)](https://raw.githubusercontent.com/vedranaa/fibre-pack/main/animation.m4v)
-
-[![Watch the video](https://raw.githubusercontent.com/vedranaa/fibre-pack/70756632024adbceb2fb5ab6c840d3a69842af07/tumbnail.jpeg)](https://raw.githubusercontent.com/vedranaa/fibre-pack/70756632024adbceb2fb5ab6c840d3a69842af07/animation.m4v)
-
-
+![Animation](animation.m4v)
 
 ## Features
 
