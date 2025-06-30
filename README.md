@@ -4,8 +4,6 @@ Fibre packing optimized with PyTorch. This module provides tools for generating,
 
 ![Results](mosaic.png)
 
-![Animation](animation.m4v)
-
 ## Features
 
 - Generate random fibre packings with specified FVF, domain radius, mean fibre radius, and standard deviation of radii. Alternatively, a list of radii may be provided.
