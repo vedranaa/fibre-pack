@@ -6,6 +6,8 @@ Fibre packing optimized with PyTorch. This module provides tools for generating,
 
 [![Watch the video](tumbnail.jpeg)](animation.m4v)
 
+[![Watch the video](https://raw.githubusercontent.com/vedranaa/fibre-pack/main/thumbnail.jpg)](https://raw.githubusercontent.com/vedranaa/fibre-pack/main/animation.m4v)
+
 
 ## Features
 
