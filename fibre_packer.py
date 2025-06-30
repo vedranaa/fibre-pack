@@ -310,25 +310,32 @@ class FibrePacker():
         self.swap_points(swap[0], knn=swap[1])
         self.perturb_points('end', noise)
 
-    # TODO add staggered type where each fibre has different profile 
-    # with different z-position of the fastest  movement
-    def interpolate_configuration(self, Z, z_multiplier=1, type='mixed'):
+
+    def interpolate_configuration(self, Z, style='staggered'):
         if (self.boundaries['start'] is None) or (self.boundaries['end'] is None):
             print("Aborting. Boundary slices not initialized.")
             return
-        if type == 'linear':
+        if style == 'linear':
             w = torch.linspace(0, 1, Z)
-        elif type == 'logistic':
+            w = w.view(Z, 1, 1)
+        elif style == 'logistic':
             w = torch.special.expit(torch.linspace(-4, 4, Z))
             w = (w - w[0]) / (w[-1] - w[0])
-        else:
+            w = w.view(Z, 1, 1)
+        elif style == 'mixed':
             w = torch.special.expit(torch.linspace(-4, 4, Z))
             w = (w - w[0]) / (w[-1] - w[0])
             w = 0.5 * (w + torch.linspace(0, 1, Z))
-        w = w.view(Z, 1, 1)
+            w = w.view(Z, 1, 1)
+        elif style == 'staggered':
+            k = torch.linspace(-1, 1, Z).view(Z, 1, 1)
+            l = 10 * torch.rand(self.N).view(1, 1, self.N) - 5
+            m = 8 * torch.rand(self.N).view(1, 1, self.N) + 1
+            w = torch.special.expit(k * m + l)
+            w = (w - w[0]) / (w[-1] - w[0])
+            w = 0.75 * w + 0.25 * torch.linspace(0, 1, Z).view(Z, 1, 1)
         self.configuration = (1 - w) * self.boundaries['start'] + w * self.boundaries['end']
         self.Z = Z
-        self.z_multiplier = z_multiplier
     
     def cluster(self, k):
         '''Very rough clustering of points.'''
@@ -878,21 +885,35 @@ class FibrePacker():
         print(f"Saved to {filename}")
 
     
-    def save_mesh(self, filename, close_ends=False, n=16):
+    def save_mesh(self, filename, close_ends=False, n=16, xyz=None):
 
         if self.configuration is None:
             print("Aborting. No configuration.")
             return
         
         x, y = self.configuration.transpose(0, 1)
-        z = torch.arange(self.Z) * self.z_multiplier
-        z = z - z[-1]/2
+        z = torch.arange(self.Z)
+        r = self.radii
+
+        if xyz is None:
+            # saving with z-direction center in origin
+            z = z - z[-1]/2 
+        elif type(xyz) is tuple:
+            # saving so it matches voxelization
+            a = 0.5 * (xyz[0] - 1) / self.R
+            x = a * x + 0.5 * (xyz[0] - 1)
+            y = a * y + 0.5 * (xyz[0] - 1)
+            r = a * r
+            z = z * (xyz[1] - 1) / (self.Z - 1)
+        else: 
+            # using only z-multiplier
+            z = z - z[-1]/2
+            z *= xyz
 
         tube = make_tube_faces(self.Z, n)
-            
         faces = []
         vertices = []
-        for i, (xi, yi, ri) in enumerate(zip(x.T, y.T, self.radii)):
+        for i, (xi, yi, ri) in enumerate(zip(x.T, y.T, r)):
 
             vertices.append(make_tube_vertices(xi, yi, z, ri, n))
             faces.append(tube + self.Z * n * i)
@@ -925,11 +946,11 @@ class FibrePacker():
                         + self.configuration[int(c)] * (s - f))
         return new_configuration
 
-    def project(self, thetas, bins, new_z=None):
-        if new_z is None:
+    def project(self, thetas, bins, z=None):
+        if z is None:
             configuration = self.configuration
         else:
-            configuration = self.resample(new_z)
+            configuration = self.resample(z)
         if type(bins) is int:
             bins = torch.linspace(-self.R, self.R, bins)
         if type(thetas) is int:
@@ -951,34 +972,34 @@ class FibrePacker():
         elif type(transition) is str:
             r = self.radii.mean()
             if transition == 'smooth':
-                mapping_function = get_mapping_function(sigma=0.1 * r)
+                mapping_function = get_mapping_function(sigma=0.2 * r)
             elif tranistion == 'enhanced':
-                mapping_function = get_mapping_function(sigma=0.1 * r, edge=0.5)
+                mapping_function = get_mapping_function(sigma=0.2 * r, edge=0.5)
         elif type(transition) is tuple:
             mapping_function = get_mapping_function(sigma=transition[0], edge=transition[1])
         return mapping_function
      
-    def voxelize(self, pixels=None, new_z=None, transition=None):
-        if new_z is None:
+    def voxelize(self, xy=None, z=None, transition=None):
+        if z is None:
             configuration = self.configuration
         else:
-            configuration = self.resample(new_z)
-        if pixels is None:
-            pixels = torch.arange(-self.R, self.R, 1)
-        elif type(pixels) is int:
-            pixels = torch.linspace(-self.R, self.R, pixels)
-        elif type(pixels) is not torch.Tensor:
-            pixels = torch.tensor(pixels)
-        X, Y = torch.meshgrid(pixels, pixels, indexing='xy')
-        X, Y = X.unsqueeze(0).unsqueeze(3), Y.unsqueeze(0).unsqueeze(3)
-        radii = self.radii.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            configuration = self.resample(z)
+        if xy is None:
+            xy = torch.arange(-self.R, self.R + 1, 1)
+        elif type(xy) is int:
+            xy = torch.linspace(-self.R, self.R, xy)
+        elif type(xy) is not torch.Tensor:
+            xy = torch.tensor(xy)
+        X, Y = torch.meshgrid(xy, xy, indexing='xy')
+        X, Y = X.unsqueeze(0), Y.unsqueeze(0)
         x, y = configuration.transpose(0, 1)
-        x, y = x.unsqueeze(1).unsqueeze(1), y.unsqueeze(1).unsqueeze(1)
-        df = ((X - x).pow(2) + (Y - y).pow(2)).pow(0.5) - radii
-        df = df.min(dim=3)[0]
-
+        x, y = x.unsqueeze(1).unsqueeze(2), y.unsqueeze(1).unsqueeze(2)
+        Z = configuration.shape[0]
+        df = torch.full((Z, len(xy), len(xy)), float(self.R))
+        for i in range(self.N):
+            dist = ((X - x[..., i])**2 + (Y - y[..., i])**2).sqrt() - self.radii[i]
+            df = torch.minimum(df, dist)
         mapping_function = self.select_mapping_function(transition)
         df = mapping_function(df)
-
         return df
 

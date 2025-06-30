@@ -4,6 +4,8 @@ Fibre packing optimized with PyTorch. This module provides tools for generating,
 
 ![Results](mosaic.png)
 
+![Results](animation.avi)
+
 
 ## Features
 
