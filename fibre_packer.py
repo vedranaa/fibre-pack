@@ -212,7 +212,7 @@ class FibrePacker():
         self.slice_weights = {
                 'overlap': None, 
                 'separation': None, 
-                'protrusion': None
+                'protrusion': None,
                 }
         self.configuration_weights = {
             'overlap': None,
@@ -220,7 +220,7 @@ class FibrePacker():
             'crossover': None,
             'stretching': None,
             'bending': None,
-            'boundary': None
+            'boundary': None,
         }
         self.separation_neighbors = 3
         self.overlap_delta = 0.01
@@ -258,16 +258,6 @@ class FibrePacker():
         ri = max_R * torch.sqrt(torch.rand(self.N, generator=self.rng))
         ai = torch.rand(self.N, generator=self.rng) * 2 * torch.pi
         self.boundaries['start'] = torch.stack((ri * torch.cos(ai), ri * torch.sin(ai)))
-    
-    def initialize_end_slice_first_try(self):
-        if self.boundaries['start'] is None:
-            print("Aborting. Start slice not initialized.")
-            return
-        self.boundaries['end'] = self.boundaries['start'].clone()
-        self.rotate_bundle((1/2, 0), 1/2.5, torch.tensor(-torch.pi/2))
-        self.rotate_bundle((1/2, 0), 1/2, torch.tensor(-torch.pi/3))
-        self.rotate_bundle((0, 0), 1, torch.tensor(torch.pi/4))
-        self.swap_points(1/5)
 
     def initialize_end_slice(self, misalignment, k=3):
         # k is the number of clusters
