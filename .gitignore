@@ -1,5 +1,7 @@
+# Custom
 *.DS_Store
-
+/batch_*
+/out
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -12,5 +14,3 @@ __pycache__/
 # IPython
 profile_default/
 ipython_config.py
-/batch_*
-/out
