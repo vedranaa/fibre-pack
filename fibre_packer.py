@@ -471,7 +471,6 @@ class FibrePacker():
         for z in range(self.Z):
             shapes = self.get_slice_circles(z)
             frames.append(go.Frame(layout=dict(shapes=shapes), name=str(z)))
-        d = self.R + self.radii.max()
         layout = animation_controls(self.Z)
         layout.update(self.get_layout())   
         fig = go.Figure(layout=layout, frames=frames)
