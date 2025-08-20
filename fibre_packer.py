@@ -157,17 +157,29 @@ def overlap_for_configuration(configuration, min_d, return_coordinates=True):
     overlap_coordinates = indices_to_coordinates(overlap_indices, configuration)
     return overlap_values, overlap_coordinates
 
-def get_mapping_function(sigma=None, edge=None):
+def get_mapping_function(transition=None, r=0, sigma=None, edge=None):
     '''For mapping the signed distance field to intensity.'''
-    def f(x):
-        if sigma is None:
-            return 1 - torch.heaviside(x, torch.tensor(0.5))
+
+    # Handle transition parameter first
+    if transition == 'smooth':
+        sigma = 0.2 * r
+    elif transition == 'enhanced':
+        sigma = 0.2 * r
+        edge = 0.5
+    elif isinstance(transition, tuple):
+        sigma, edge = transition
+    
+    # Return the mapping function
+    if sigma is None:
+        return lambda x: 1 - torch.heaviside(x, torch.tensor(0.5))
+    
+    def smooth_mapping(x):
         hg = 1 - 0.5 * (1 + torch.special.erf(x / (2**0.5 * sigma)))
         if edge is None:
             return hg
-        else:
-            return hg - edge * x / sigma * torch.exp(0.5 * (1 - (x / sigma)**2))
-    return f
+        return hg - edge * x / sigma * torch.exp(0.5 * (1 - (x / sigma)**2))
+    
+    return smooth_mapping
 
 
 ## FIBRE PACKER CLASS
@@ -954,20 +966,7 @@ class FibrePacker():
             g = 2 * (torch.relu(radii**2 - (bins - f)**2)).pow(0.5)
             p.append(g.sum(dim=2))
         return torch.stack(p, dim=0)
-    
-    def select_mapping_function(self, transition=None):
-        if transition is None:
-            mapping_function = get_mapping_function()
-        elif type(transition) is str:
-            r = self.radii.mean()
-            if transition == 'smooth':
-                mapping_function = get_mapping_function(sigma=0.2 * r)
-            elif tranistion == 'enhanced':
-                mapping_function = get_mapping_function(sigma=0.2 * r, edge=0.5)
-        elif type(transition) is tuple:
-            mapping_function = get_mapping_function(sigma=transition[0], edge=transition[1])
-        return mapping_function
-     
+         
     def voxelize(self, xy=None, z=None, transition=None):
         if z is None:
             configuration = self.configuration
@@ -988,7 +987,7 @@ class FibrePacker():
         for i in range(self.N):
             dist = ((X - x[..., i])**2 + (Y - y[..., i])**2).sqrt() - self.radii[i]
             df = torch.minimum(df, dist)
-        mapping_function = self.select_mapping_function(transition)
+        mapping_function = get_mapping_function(transition, self.radii.mean())
         df = mapping_function(df)
         return df
 
