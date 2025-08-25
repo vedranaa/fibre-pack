@@ -277,38 +277,54 @@ class FibrePacker():
             print("Aborting. Start slice not initialized.")
             return
         self.boundaries['end'] = self.boundaries['start'].clone()
-    
-        if misalignment == 'none':
+
+        if type(misalignment) is dict:
+            angle_range_clusters = misalignment['angle_range_clusters']
+            angle_range_bundle = misalignment['angle_range_bundle']
+            swap = misalignment['swap']
+            noise = misalignment['noise']
+        elif misalignment == 'none':
             return
         elif misalignment=='very low':
-            angle_range = (0, 5)
+            angle_range_clusters = (0, 5, True)
+            angle_range_bundle = (0, 5, True)
             swap = (0.01, 3)
             noise = 0.1
         elif misalignment=='low':
-            angle_range = (5, 10)
+            angle_range = (5, 10, True)
+            angle_range_bundle = (5, 10, True)
             swap = (0.02, 6)
             noise = 0.2
         elif misalignment=='moderate':
-            angle_range = (10, 15)
+            angle_range_clusters = (10, 15, True)
+            angle_range_bundle = (10, 15, True)
             swap = (0.04, 12)
             noise = 0.4
         elif misalignment=='high':
-            angle_range = (15, 20)
+            angle_range_clusters = (15, 20, True)
+            angle_range_bundle = (15, 20, True)
             swap = (0.08, 24)
             noise = 0.8
         elif misalignment=='very high':
-            angle_range = (20, 25)
+            angle_range_clusters = (20, 25, True)
+            angle_range_bundle = (20, 25, True)
             swap = (0.16, 48)
             noise = 1.6
 
         clusters = self.cluster(k)
-        da = angle_range[1] - angle_range[0]
-        angles = - da + 2 * da * torch.rand(k + 1)
-        angles = torch.sign(angles) * angle_range[0] + angles
-        angles = angles/ 180 * torch.pi
+        angles = angle_range_clusters[0] + (angle_range_clusters[1] - 
+                angle_range_clusters[0]) * torch.rand(k, generator=self.rng)
+        if angle_range_clusters[2]:
+            angles *= (2 * (torch.rand(k, generator=self.rng) > 0.5) - 1)
+        angles = angles / 180 * torch.pi
         for i, cluster in enumerate(clusters):
             self.rotate_cluster(cluster, angles[i])
-        self.rotate_bundle((0, 0), 1, angles[-1])
+        bundle_angle = angle_range_bundle[0] + (angle_range_bundle[1] - 
+                angle_range_bundle[0]) * torch.rand(1, generator=self.rng)
+        if angle_range_bundle[2]:
+           bundle_angle *= (2 * (torch.rand(1, generator=self.rng) > 0.5) - 1)
+        bundle_angle = bundle_angle / 180 * torch.pi
+        self.rotate_bundle((0, 0), 2, bundle_angle)
         self.swap_points(swap[0], knn=swap[1])
         self.perturb_points('end', noise)
 
@@ -331,8 +347,8 @@ class FibrePacker():
             w = w.view(Z, 1, 1)
         elif style == 'staggered':
             k = torch.linspace(-1, 1, Z).view(Z, 1, 1)
-            l = 10 * torch.rand(self.N).view(1, 1, self.N) - 5
-            m = 8 * torch.rand(self.N).view(1, 1, self.N) + 1
+            l = 10 * torch.rand(self.N, generator=self.rng).view(1, 1, self.N) - 5
+            m = 8 * torch.rand(self.N, generator=self.rng).view(1, 1, self.N) + 1
             w = torch.special.expit(k * m + l)
             w = (w - w[0]) / (w[-1] - w[0])
             w = 0.75 * w + 0.25 * torch.linspace(0, 1, Z).view(Z, 1, 1)
@@ -362,7 +378,7 @@ class FibrePacker():
         self.boundaries['end'][:, bundle] = R @ (self.boundaries['end'][:, bundle] - center) + center
 
     def rotate_cluster(self, cluster, angle):
-        '''Rotate a bundle around a center.'''
+        '''Rotate a fibre cluster around its center.'''
         center = self.boundaries['end'][:, cluster].mean(dim=1, keepdim=True)
         c, s = np.cos(angle), np.sin(angle)
         R = torch.tensor([[c, -s], [s, c]], dtype=torch.float)
