@@ -42,7 +42,7 @@ The main class for creating and manipulating fibre packings.
 #### Analysis
 
 - `get_full_analysis()`: Compute overlap, protrusion, stretching, and bending metrics.
-- `assess_analysis_summary(id=None)`: Assess the quality of a slice or configuration.
+- `assess_analysis_summary(id=None)`: Assess the quality of a slice or configuration as either 'perfect', 'great', 'ok', or 'bad'.
 
 #### Visualization
 
