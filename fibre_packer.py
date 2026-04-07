@@ -182,6 +182,17 @@ def get_mapping_function(transition=None, r=0, sigma=None, edge=None):
     return smooth_mapping
 
 
+def select_device():
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f"Using device {device}")
+    return device
+
+
 ## FIBRE PACKER CLASS
 
 def from_n(R, N, r_mean, r_sigma=0, rng=None):
@@ -509,16 +520,6 @@ class FibrePacker():
     
     ### OPTIMIZATION METHODS
 
-    def select_device(self):
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda')
-        elif torch.backends.mps.is_available():
-            self.device = torch.device('mps')
-        else:
-            self.device = torch.device('cpu')
-        print(f"Using device {self.device}")
-        return self.device
-
     def optimize_slice(self, id, iters=200):        
         p = self.boundaries[id]
         if p is None:
@@ -530,7 +531,7 @@ class FibrePacker():
         k = self.separation_neighbors
         
         if self.device is None:
-            self.select_device()
+            self.device = select_device()
 
         p = p.to(self.device)
         p.requires_grad = True
@@ -574,7 +575,7 @@ class FibrePacker():
         delta = self.overlap_delta * self.radii.mean()
 
         if self.device is None:
-            self.select_device()
+            self.device = select_device()
 
         configuration = self.configuration.to(self.device)
         configuration.requires_grad = True
