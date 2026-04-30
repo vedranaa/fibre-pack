@@ -302,7 +302,7 @@ class FibrePacker():
             swap = (0.01, 3)
             noise = 0.1
         elif misalignment=='low':
-            angle_range = (5, 10, True)
+            angle_range_clusters = (5, 10, True)
             angle_range_bundle = (5, 10, True)
             swap = (0.02, 6)
             noise = 0.2
