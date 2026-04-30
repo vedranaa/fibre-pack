@@ -23,8 +23,8 @@ The main class for creating and manipulating fibre packings.
 #### Initialization
 
 - `FibrePacker()`: Create a new packer instance.
-- [`from_n`](fibre_packer.py): Create a packer with a given number of fibres.
-- [`from_fvf`](fibre_packer.py): Create a packer with a target fibre volume fraction.
+- `from_n(R, N, r_mean, ...)`: Create a packer with a given number of fibres.
+- `from_fvf(R, fvf, r_mean, ...)`: Create a packer with a target fibre volume fraction.
 
 #### Slice and Configuration Methods
 
